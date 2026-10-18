@@ -1,0 +1,29 @@
+SET
+== 1. Conteos del nodo ==
+        tabla        | filas 
+---------------------+-------
+ manifiesto_carga    |   300
+ contenedor          |  1800
+ detalle_mercancia   |  5400
+ inspeccion_transito |  7200
+(4 rows)
+
+== 2. Pruebas (violaciones deben ser 0) ==
+             prueba              | violaciones | resultado 
+---------------------------------+-------------+-----------
+ cifrado_no_descifra             |           0 | OK
+ contenedores_sin_detalle        |           0 | OK
+ contenedores_sin_manifiesto     |           0 | OK
+ inventario_vs_estado_contenedor |           0 | OK
+ manifiestos_de_otra_terminal    |           0 | OK
+ sobrepeso                       |           0 | OK
+(6 rows)
+
+== 3. Cifrado ida y vuelta ==
+ id_agente_aduanero |   cedula    
+--------------------+-------------
+                  1 | 1-1077-0013
+                  2 | 1-1154-0026
+                  3 | 1-1231-0039
+(3 rows)
+
