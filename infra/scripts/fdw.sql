@@ -1,10 +1,11 @@
 -- Vistas globales via postgres_fdw. Correr en CUALQUIER nodo primario (ve su fragmento local + los 2 remotos):
---   docker compose exec -T nodo1 psql -U postgres -d puerto -v nodo=1 < scripts/fdw.sql
--- Variables opcionales: -v host_fmt='nodo%s' -v port_fmt='5432' -v pass=postgres
+--   (ver scripts/fdw.sh)
+-- Obligatoria: -v pass=<POSTGRES_PASSWORD>. Opcionales: -v host_fmt='nodo%s' -v port_fmt='5432'
+-- Recomendado: bash scripts/fdw.sh (carga la clave desde .env y corre los 3 nodos)
 \set ON_ERROR_STOP on
 \if :{?host_fmt} \else \set host_fmt 'nodo%s' \endif
 \if :{?port_fmt} \else \set port_fmt '5432' \endif
-\if :{?pass} \else \set pass 'postgres' \endif
+\if :{?pass} \else \echo 'ERROR: falta -v pass=... (usa scripts/fdw.sh, que lo toma de .env)' \quit \endif
 SET fdw.nodo = :'nodo'; SET fdw.host_fmt = :'host_fmt'; SET fdw.port_fmt = :'port_fmt'; SET fdw.pass = :'pass';
 CREATE EXTENSION IF NOT EXISTS postgres_fdw;
 DROP SCHEMA IF EXISTS global CASCADE;

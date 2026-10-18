@@ -28,9 +28,9 @@ x-pg: &pg
   networks: [portuaria_net]
 
 x-env: &pgenv
-  POSTGRES_PASSWORD: postgres
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en infra/.env (copia .env.example a .env)}
   POSTGRES_DB: puerto
-  REPL_PASS: repl_dev
+  REPL_PASS: ${REPL_PASS:?Falta REPL_PASS en infra/.env (copia .env.example a .env)}
 
 services:
   nodo1:
