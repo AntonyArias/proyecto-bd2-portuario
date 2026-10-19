@@ -1,0 +1,10 @@
+{
+  "base_datos": "puerto",
+  "usuario": "postgres",
+  "terminales": {
+    "1": {"nombre": "Moin",    "nodos": ["localhost:5441", "localhost:5451"]},
+    "2": {"nombre": "Limon",   "nodos": ["localhost:5442", "localhost:5452"]},
+    "3": {"nombre": "Caldera", "nodos": ["localhost:5443", "localhost:5453"]}
+  },
+  "nota": "Cada terminal escribe solo en su fragmento. Conectar con host=localhost,localhost port=PRIMARIO,STANDBY target_session_attrs=read-write: el driver elige solo el nodo que acepta escrituras, asi no hay que actualizar este archivo tras un failover. La clave NO esta aqui: cada quien usa la de su infra/.env."
+}
