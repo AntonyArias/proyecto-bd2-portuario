@@ -1,0 +1,5 @@
+=== RESULTADO fragmento 3 (ensayo 184951) ===
+Primario caido: nodo3sb | promovido: nodo3
+Deteccion: 6.2s | Promocion: 7.1s | Total desde la caida: 13.3s
+Cliente: confirmadas=54821 errores=38 tps=1218 ventana_sin_servicio_max_s=12.2
+Confirmadas al cliente: 54821 | PERDIDAS: 0 | en duda (el servidor confirmo, el cliente no lo supo): 1

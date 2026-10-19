@@ -1,0 +1,5 @@
+=== RESULTADO fragmento 2 (ensayo 184850) ===
+Primario caido: nodo2sb | promovido: nodo2
+Deteccion: 6.0s | Promocion: 7.0s | Total desde la caida: 13.0s
+Cliente: confirmadas=55944 errores=43 tps=1243 ventana_sin_servicio_max_s=12.1
+Confirmadas al cliente: 55944 | PERDIDAS: 0 | en duda (el servidor confirmo, el cliente no lo supo): 1
