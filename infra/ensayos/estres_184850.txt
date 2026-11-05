@@ -1,0 +1,1 @@
+confirmadas=55944 errores=43 tps=1243 ventana_sin_servicio_max_s=12.1
