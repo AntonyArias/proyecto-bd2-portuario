@@ -1,15 +1,14 @@
 #!/bin/bash
 # Compara catalogos y entidades comunes entre los 3 primarios (hash del contenido). Correr desde infra/.
-# En agente_aduanero compara el texto DESCIFRADO: el cifrado usa sal aleatoria y los bytes difieren entre nodos.
+# Actualizado a la nomenclatura PascalCase y prefijos CI/CT/CB/CD/CF.
 cd "$(dirname "$0")/.."
-# --- consulta ---
-TABLAS="pais tipo_contenedor estado_contenedor tipo_inspeccion partida_arancelaria terminal_maritima dependencia_aduanera naviera buque"
+TABLAS="Pais TipoContenedor EstadoContenedor TipoInspeccion PartidaArancelaria TerminalMaritima DependenciaAduanera Naviera Buque"
 Q=""
 for t in $TABLAS; do
-  Q="$Q SELECT '$t', md5(string_agg(x::text, '|' ORDER BY x::text)) FROM puerto.$t x UNION ALL"
+  Q="$Q SELECT '$t', md5(string_agg(x::text, '|' ORDER BY x::text)) FROM puerto.\"$t\" x UNION ALL"
 done
-Q="$Q SELECT 'agente_aduanero', md5(string_agg(concat_ws(',', id_agente_aduanero, codigo_licencia, nombre, apellidos, correo, activo, puerto.descifrar(cedula_enc), puerto.descifrar(telefono_enc)), '|' ORDER BY id_agente_aduanero)) FROM puerto.agente_aduanero ORDER BY 1"
-# --- fin consulta ---
+Q="$Q SELECT 'AgenteAduanero', md5(string_agg(concat_ws(',', \"CI_IdAgenteAduanero\", \"CT_CodigoLicencia\", \"CT_Nombre\", \"CT_Apellidos\", \"CT_Correo\", \"CB_Activo\", puerto.descifrar(\"CT_CedulaEnc\"), puerto.descifrar(\"CT_TelefonoEnc\")), '|' ORDER BY \"CI_IdAgenteAduanero\")) FROM puerto.\"AgenteAduanero\" ORDER BY 1"
+
 for N in 1 2 3; do
   P=$(bash scripts/primario_actual.sh $N) || { echo "Fragmento $N sin primario vivo"; exit 1; }
   eval "R$N=\$(docker compose exec -T $P psql -U postgres -d puerto -At -F'|' -c \"\$Q\" | tr -d '\r')"

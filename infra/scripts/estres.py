@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Carga concurrente con reintento. Uso: python estres.py <nodo> <hilos> <segundos>   (clave en PGPASSWORD, etiqueta en TAG)
+"""Carga concurrente con reintento (actualizado a nomenclatura PascalCase / CI_ / CT_).
+Uso: python estres.py <nodo> <hilos> <segundos>   (clave en PGPASSWORD, etiqueta en TAG)
 Conexion multi-host: libpq prueba primario y standby y se queda con el que acepta escrituras."""
 import os, sys, time, random, threading, psycopg2
 nodo, hilos, dur = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
@@ -18,9 +19,9 @@ def worker(t):
                     with lock: caidas.append(time.time() - sin)
                     sin = None
             cur = conn.cursor()
-            cur.execute("""INSERT INTO puerto.inspeccion_transito
-                (id_contenedor,id_tipo_inspeccion,id_agente_aduanero,resultado,observaciones)
-                VALUES (%s,%s,%s,'CONFORME',%s) RETURNING id_inspeccion_transito""",
+            cur.execute("""INSERT INTO puerto."InspeccionTransito"
+                ("CI_IdContenedor","CI_IdTipoInspeccion","CI_IdAgenteAduanero","CT_Resultado","CT_Observaciones")
+                VALUES (%s,%s,%s,'CONFORME',%s) RETURNING "CI_IdInspeccionTransito"""",
                 (base + 1 + random.randrange(100), 1 + random.randrange(5), 1 + random.randrange(30), f"estres {TAG} hilo {t}"))
             rid = cur.fetchone()[0]; conn.commit()      # solo cuenta como confirmada tras el COMMIT
             with lock: acked.append(rid)
