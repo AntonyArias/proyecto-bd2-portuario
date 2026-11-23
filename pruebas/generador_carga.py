@@ -1,34 +1,46 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-generador_carga.py | Carga masiva y concurrente de movimientos logisticos (inspecciones)
-para la prueba de estres. Enruta cada terminal a su nodo, registra exitos y fallos con marca de
-tiempo, reintenta y redirige al standby cuando el primario cae.
+generador_carga.py | Carga masiva y concurrente para la prueba de estres (Rol 1).
 
-Requisitos:  pip install psycopg2-binary      (ver requirements.txt)
-Credenciales: variables de entorno estandar de PostgreSQL (PGUSER, PGPASSWORD, PGDATABASE, PGHOST).
-              La contrasena NO va en el repo (ver .env.example).
+Que hace
+  * Lee infra/enrutamiento.json (Rol 2): para cada terminal, su primario y su standby.
+  * Conecta a cada terminal con host=primario,standby + target_session_attrs=read-write:
+    libpq elige solo el nodo que acepta escrituras, asi que tras un failover (standby
+    promovido) basta con reconectar; no hay que editar el archivo.
+  * Ejecuta movimientos logisticos en paralelo (un grupo de hilos por terminal):
+      ingresar  -> CALL puerto.sp_ingresar_manifiesto(...)   (Rol 3)
+      despachar -> CALL puerto.sp_despachar_mercancia(...)   (Rol 3)
+      retener / liberar / revisar -> INSERT en "InspeccionTransito"; los triggers del
+                   Rol 3 aplican el efecto sobre contenedor e inventario (no hay
+                   procedimiento para estos movimientos).
+  * Registra cada intento (marca de tiempo, hilo, terminal, operacion, resultado, SQLSTATE,
+    ms) en un CSV y, al final, el tiempo entre la caida detectada y la primera escritura
+    exitosa de cada terminal.
 
-Topologia (decisiones congeladas del equipo):
-    terminal 1 = Moin    primario 5441   standby 5451
-    terminal 2 = Limon   primario 5442   standby 5452
-    terminal 3 = Caldera primario 5443   standby 5453
-Cada terminal se escribe SOLO en su nodo: ninguna operacion toca dos fragmentos.
+Clasificacion de errores
+  OK / OK_VERIFICADO  escritura confirmada
+  REINTENTO           deadlock o fallo de serializacion (40P01 / 40001): se reintenta en el mismo nodo
+  FALLO_CONEXION      nodo caido o sin promover: se reconecta con espera creciente (hasta --espera-max)
+  RECHAZADA           el procedimiento rechazo por regla de negocio (SQLSTATE P0xxx, 23xxx); NO se reintenta
+  DESCARTADA          se agoto --espera-max sin lograr escribir
+  ERROR_OTRO          cualquier otro error (se registra, no se reintenta)
+  SIN_CANDIDATO       no habia contenedor elegible para esa operacion
 
-Modos de operacion:
-    --modo insert   (por defecto) INSERT directo en puerto."InspeccionTransito".
-                    Sirve para probar la caida de un nodo mientras no esten listos los
-                    procedimientos del Rol 3.
-    --modo llamada  Ejecuta la sentencia que se pase en --llamada, con parametros con nombre.
-                    Parametros disponibles: %(id_terminal)s %(id_contenedor)s %(id_tipo_inspeccion)s
-                    %(id_agente_aduanero)s %(resultado)s %(observaciones)s
-                    Ejemplo (el nombre real lo define el Rol 3):
-                    --llamada "CALL puerto.<procedimiento>(%(id_contenedor)s, %(id_tipo_inspeccion)s)"
-                    (los nombres de parametro son internos del generador; no son columnas de la BD)
+Uso
+  pip install -r requirements.txt
+  export GEN_CLAVE=...                     # clave del usuario (por defecto operador_user)
+  python3 pruebas/generador_carga.py --hilos 6 --duracion 120
+  python3 pruebas/generador_carga.py --total 20000 --pesos 3,2,1
+  python3 pruebas/generador_carga.py --solo-ejemplo     # muestra la configuracion y un ejemplo, sin conectar
 
-Ejemplos:
-    python3 pruebas/generador_carga.py --hilos 8 --duracion 120
-    python3 pruebas/generador_carga.py --total 20000 --pesos 3,2,1
-    python3 pruebas/generador_carga.py --enrutamiento enrutamiento.json
+Variables de entorno
+  GEN_USUARIO  usuario de conexion (por defecto operador_user)
+  GEN_CLAVE    su clave; si falta se prueba OPERADOR_PASS y, si el usuario es postgres,
+               POSTGRES_PASSWORD; si tampoco existe, libpq usa PGPASSWORD o ~/.pgpass.
+
+Supuesto: se ejecuta UN solo generador a la vez (los numeros de manifiesto y de contenedor
+se toman a partir del maximo existente en cada nodo).
 """
 import argparse
 import csv
@@ -39,293 +51,504 @@ import signal
 import sys
 import threading
 import time
-from collections import Counter
-from datetime import datetime
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
 
-import psycopg2
+try:
+    import psycopg2
+except ImportError:          # permite --solo-ejemplo y las pruebas sin el driver
+    psycopg2 = None
 
-PUERTOS_PRIMARIO = {1: 5441, 2: 5442, 3: 5443}
-PUERTOS_STANDBY = {1: 5451, 2: 5452, 3: 5453}
+RAIZ = Path(__file__).resolve().parent.parent
+ENRUTAMIENTO_DEFECTO = RAIZ / "infra" / "enrutamiento.json"
 NOMBRE_TERMINAL = {1: "Moin", 2: "Limon", 3: "Caldera"}
-N_AGENTES = 30          # agentes cargados por 02_dml/02_entidades_comunes.sql (IDs 1..30)
-TIPOS_INSPECCION = [1, 2, 3, 4, 5]
-RESULTADO_POR_TIPO = {3: "RETENIDO", 4: "AUTORIZADO", 5: "AUTORIZADO"}
-CODIGOS_REINTENTABLES = ("40001", "40P01")   # fallo de serializacion / deadlock: reintentar en el MISMO nodo
+PREFIJO_ISO = {1: "MOIU", 2: "LIMU", 3: "CALU"}
+PUERTOS_ORIGEN = ["Shanghai", "Rotterdam", "Miami", "Cartagena", "Colon", "Veracruz", "Santos", "Valencia"]
+
+# id_tipo_contenedor -> (es_refrigerado, es_de_20_pies); coincide con el catalogo TipoContenedor
+TIPOS_CONTENEDOR = {1: (False, True), 2: (False, False), 3: (False, False),
+                    4: (True, True), 5: (True, False)}
+PARTIDAS_REFRIGERADAS = (1, 2)            # el trigger de cadena de frio exige estas partidas
+PARTIDAS_SECAS = tuple(range(3, 17))      # y prohibe usarlas en contenedores secos
+TEMPERATURAS = (-18.0, 4.0, 2.0)
+
+# estados de EstadoContenedor
+ESTADOS_ACTIVOS = (2, 3, 4, 6)            # se puede despachar o retener
+ESTADOS_REVISION = (1, 2, 3)              # se puede pasar a EN_INSPECCION
+ESTADO_RETENIDO = 5
+
+MEZCLA_DEFECTO = "ingresar=30,despachar=30,retener=15,liberar=10,revisar=15"
+RESULTADOS_EXITO = {"OK", "OK_VERIFICADO"}
+
+CODIGOS_REINTENTABLES = {"40001", "40P01"}
+CODIGOS_RECONECTAR = {"25006", "57P01", "57P02", "57P03", "57014", "53300"}
+
+SQL_CANDIDATO = ('SELECT "CI_IdContenedor" FROM puerto."Contenedor" '
+                 'WHERE "CI_IdEstadoContenedor" = ANY(%s) '
+                 'ORDER BY random() LIMIT 1 FOR UPDATE SKIP LOCKED')
+SQL_INSPECCION = ('INSERT INTO puerto."InspeccionTransito" '
+                  '("CI_IdContenedor", "CI_IdTipoInspeccion", "CI_IdAgenteAduanero", '
+                  '"CT_Resultado", "CT_Observaciones") '
+                  'VALUES (%s, %s, %s, %s, %s) RETURNING "CI_IdInspeccionTransito"')
+SQL_INGRESAR = ("CALL puerto.sp_ingresar_manifiesto(%s::smallint, %s::char(7), %s::varchar, "
+                "%s::varchar, %s::varchar, %s::timestamptz, %s::jsonb, NULL::bigint)")
+SQL_DESPACHAR = "CALL puerto.sp_despachar_mercancia(%s::bigint, %s::varchar, %s::text, NULL::bigint)"
 
 
-# ----------------------------------------------------------------------------- rutas
-def construir_rutas(archivo):
-    """terminal -> [primario, standby], cada uno (host, puerto, etiqueta).
-    Soporta tanto el formato de infra/enrutamiento.json del Rol 2 como el formato diccionario."""
-    host = os.environ.get("PGHOST", "localhost")
-    rutas = {t: [(host, PUERTOS_PRIMARIO[t], "primario"),
-                 (host, PUERTOS_STANDBY[t], "standby")] for t in PUERTOS_PRIMARIO}
-    if not archivo and os.path.exists("infra/enrutamiento.json"):
-        archivo = "infra/enrutamiento.json"
-    if archivo and os.path.exists(archivo):
-        with open(archivo, encoding="utf-8") as f:
-            datos = json.load(f)
-        if "terminales" in datos:
-            # Formato de infra/enrutamiento.json (Rol 2):
-            # {"terminales": {"1": {"nombre": "Moin", "nodos": ["localhost:5441", "localhost:5451"]}}}
-            for t, info in datos["terminales"].items():
-                nodos_lista = info.get("nodos", [])
-                etiquetas = ("primario", "standby")
-                pares = []
-                for idx, hp in enumerate(nodos_lista[:2]):
-                    h, p = hp.split(":")
-                    pares.append((h or host, int(p), etiquetas[idx]))
-                if pares:
-                    rutas[int(t)] = pares
-        else:
-            # Formato alternativo directo: {"1": {"primario": {"host": "...", "port": 5441}, "standby": {...}}}
-            for t, nodos in datos.items():
-                if isinstance(nodos, dict) and "primario" in nodos:
-                    rutas[int(t)] = [(nodos[k].get("host", host), int(nodos[k]["port"]), k)
-                                     for k in ("primario", "standby")]
-    return rutas
+# --------------------------------------------------------------------------------------
+# Clasificacion de errores
+# --------------------------------------------------------------------------------------
+def clasificar(exc):
+    """REINTENTAR | RECONECTAR | DUPLICADO | NEGOCIO | OTRO"""
+    codigo = getattr(exc, "pgcode", None) or ""
+    if codigo in CODIGOS_REINTENTABLES:
+        return "REINTENTAR"
+    if codigo in CODIGOS_RECONECTAR or codigo.startswith("08"):
+        return "RECONECTAR"
+    if not codigo and psycopg2 is not None and isinstance(
+            exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+        return "RECONECTAR"
+    if codigo == "23505":
+        return "DUPLICADO"
+    if codigo.startswith("P0") or codigo.startswith("23"):
+        return "NEGOCIO"
+    return "OTRO"
 
 
-class Enrutador:
-    """Recuerda, por terminal, que extremo esta activo (0 = primario, 1 = standby)."""
-
-    def __init__(self, rutas):
-        self.rutas = rutas
-        self.activo = {t: 0 for t in rutas}
-        self.lock = threading.Lock()
-
-    def activa(self, t):
-        with self.lock:
-            i = self.activo[t]
-        return i, self.rutas[t][i]
-
-    def fallo(self, t, i):
-        """Cambia de extremo solo si nadie lo cambio ya (evita bailar entre hilos)."""
-        with self.lock:
-            if self.activo[t] == i:
-                self.activo[t] = 1 - i
+def resumen_error(exc):
+    texto = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    return texto[:160]
 
 
-def conectar(ruta):
-    host, puerto, _ = ruta
-    return psycopg2.connect(host=host, port=puerto, connect_timeout=3,
-                            dbname=os.environ.get("PGDATABASE", "puerto"),
-                            user=os.environ.get("PGUSER", "postgres"),
-                            options="-c statement_timeout=10000")
+# --------------------------------------------------------------------------------------
+# Generacion de datos (respeta las reglas de los triggers del Rol 3)
+# --------------------------------------------------------------------------------------
+class Contadores:
+    """Numeracion unica por terminal para manifiestos y numeros ISO, segura entre hilos."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sig = {}
+
+    def iniciar(self, terminal, ultimo_manifiesto, ultimo_iso):
+        self._sig[(terminal, "m")] = ultimo_manifiesto + 1
+        self._sig[(terminal, "i")] = ultimo_iso + 1
+
+    def siguiente(self, terminal, clase):
+        with self._lock:
+            n = self._sig[(terminal, clase)]
+            if n > 999999:
+                raise RuntimeError("Se agoto la numeracion de 6 digitos en la terminal %d" % terminal)
+            self._sig[(terminal, clase)] = n + 1
+            return n
 
 
-def es_de_conexion(e):
-    """Errores que justifican reintentar/redirigir (caida, corte, standby de solo lectura)."""
-    return (isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError))
-            or getattr(e, "pgcode", None) == "25006")
-
-
-# ----------------------------------------------------------------------------- contexto
-class Contexto:
-    def __init__(self, args, enrutador, contenedores, archivo_log):
-        self.args = args
-        self.enr = enrutador
-        self.contenedores = contenedores            # terminal -> [id_contenedor]
-        self.terminales = sorted(contenedores)
-        pesos = [int(p) for p in args.pesos.split(",")]
-        self.pesos = [pesos[t - 1] for t in self.terminales]
-        self.parar = threading.Event()
-        self.lock = threading.Lock()
-        self.cuenta = Counter()                     # (terminal, resultado) -> n
-        self.operaciones = 0
-        self.primer_fallo = {}                      # terminal -> instante
-        self.recuperado = {}                        # terminal -> instante
-        self.f = open(archivo_log, "w", newline="", encoding="utf-8")
-        self.csv = csv.writer(self.f)
-        self.csv.writerow(["marca_tiempo", "hilo", "terminal", "extremo", "intento",
-                           "resultado", "ms", "detalle"])
-
-    def tomar_operacion(self):
-        with self.lock:
-            if self.args.total and self.operaciones >= self.args.total:
-                return False
-            self.operaciones += 1
-            return True
-
-    def registrar(self, hilo, t, ruta, intento, resultado, ms, detalle=""):
-        ahora = time.time()
-        with self.lock:
-            self.cuenta[(t, resultado)] += 1
-            if resultado == "FALLO":
-                self.primer_fallo.setdefault(t, ahora)
-            elif resultado == "OK" and t in self.primer_fallo and t not in self.recuperado:
-                self.recuperado[t] = ahora
-            self.csv.writerow([datetime.fromtimestamp(ahora).isoformat(timespec="milliseconds"),
-                               hilo, t, f"{ruta[2]}:{ruta[1]}", intento, resultado,
-                               f"{ms:.1f}", detalle])
-            self.f.flush()
-
-
-# ----------------------------------------------------------------------------- operaciones
-def nueva_operacion(rnd, ctx, t):
-    tipo = rnd.choice(TIPOS_INSPECCION)
+def generar_contenedor(terminal, serie, rng):
+    tipo = rng.choice(list(TIPOS_CONTENEDOR))
+    refrigerado, veinte_pies = TIPOS_CONTENEDOR[tipo]
+    base = "%s%06d" % (PREFIJO_ISO[terminal], serie)
+    detalles = []
+    for k in range(rng.randint(1, 3)):
+        partida = rng.choice(PARTIDAS_REFRIGERADAS) if refrigerado else rng.choice(PARTIDAS_SECAS)
+        detalles.append({
+            "id_partida_arancelaria": partida,
+            "descripcion": "Carga generada %06d-%d" % (serie, k + 1),
+            "cantidad": rng.randint(1, 500),
+            "peso_kg": round(rng.uniform(200, 5200), 2),      # 3 lineas <= 15 600 kg: nunca hay sobrepeso
+            "valor_declarado": round(rng.uniform(500, 50000), 2),
+        })
     return {
-        "id_terminal": t,
-        "id_contenedor": rnd.choice(ctx.contenedores[t]),
-        "id_tipo_inspeccion": tipo,
-        "id_agente_aduanero": rnd.randint(1, N_AGENTES),
-        "resultado": RESULTADO_POR_TIPO.get(tipo, rnd.choice(["CONFORME", "CONFORME", "OBSERVACION"])),
-        "observaciones": f"generador_carga {datetime.now().isoformat(timespec='seconds')}",
+        "numero_iso": base + str(serie % 10),
+        "id_tipo_contenedor": tipo,
+        "requiere_refrigeracion": refrigerado,
+        "temperatura_c": rng.choice(TEMPERATURAS) if refrigerado else None,
+        "id_estado_contenedor": rng.choice((1, 2, 3)),          # el procedimiento solo acepta 1, 2 o 3
+        "tara_kg": round(rng.uniform(2200, 2450) if veinte_pies else rng.uniform(3800, 4100), 2),
+        "peso_max_kg": 30480 if veinte_pies else 32500,
+        "detalles": detalles,
     }
 
 
-SQL_INSERT = """
-    INSERT INTO puerto."InspeccionTransito"
-        ("CI_IdContenedor", "CI_IdTipoInspeccion", "CI_IdAgenteAduanero",
-         "CT_Resultado", "CT_Observaciones")
-    VALUES (%(id_contenedor)s, %(id_tipo_inspeccion)s, %(id_agente_aduanero)s,
-            %(resultado)s, %(observaciones)s)"""
+def generar_manifiesto(terminal, contadores, rng, imos, licencias):
+    """Argumentos de sp_ingresar_manifiesto (sin el INOUT final)."""
+    numero = contadores.siguiente(terminal, "m")
+    contenedores = [generar_contenedor(terminal, contadores.siguiente(terminal, "i"), rng)
+                    for _ in range(rng.randint(1, 4))]
+    return (terminal, rng.choice(imos), rng.choice(licencias), "MAN-T%d-%06d" % (terminal, numero),
+            rng.choice(PUERTOS_ORIGEN), datetime.now(timezone.utc), json.dumps(contenedores))
 
 
-def hilo_trabajo(n, ctx):
-    rnd = random.Random(ctx.args.semilla + n)
-    conexiones = {}                                 # (terminal, extremo) -> conexion
-    sql = SQL_INSERT if ctx.args.modo == "insert" else ctx.args.llamada
-    while not ctx.parar.is_set() and ctx.tomar_operacion():
-        t = rnd.choices(ctx.terminales, weights=ctx.pesos)[0]
-        op = nueva_operacion(rnd, ctx, t)
-        for intento in range(1, ctx.args.intentos + 1):
-            if ctx.parar.is_set():
-                break
-            i, ruta = ctx.enr.activa(t)
-            inicio = time.perf_counter()
-            conn = None
+# --------------------------------------------------------------------------------------
+# Contexto compartido: registro, conteos, episodios de caida
+# --------------------------------------------------------------------------------------
+class Contexto:
+    def __init__(self, args, dsn, mezcla, escritor, archivo):
+        self.args, self.dsn, self.mezcla = args, dsn, mezcla
+        self.escritor, self.archivo = escritor, archivo
+        self.parar = threading.Event()
+        self.lock = threading.Lock()
+        self.cuenta = Counter()                    # (terminal, resultado)
+        self.por_operacion = Counter()             # (operacion, resultado)
+        self.caida_desde = {}                      # terminal -> instante del primer fallo
+        self.episodios = defaultdict(list)         # terminal -> [(inicio, fin)]
+        self.restantes = args.total
+        self.contadores = Contadores()
+        self.datos = {}                            # terminal -> {"imos", "licencias", "agentes"}
+        self.t0 = time.time()
+
+    def conectar(self, terminal):
+        return psycopg2.connect(**self.dsn[terminal])
+
+    def tomar_operacion(self):
+        if self.parar.is_set():
+            return False
+        if self.restantes is None:
+            return True
+        with self.lock:
+            if self.restantes <= 0:
+                return False
+            self.restantes -= 1
+            return True
+
+    def registrar(self, hilo, terminal, operacion, intento, resultado, sqlstate, ms, id_generado, detalle):
+        ahora = time.time()
+        with self.lock:
+            self.cuenta[(terminal, resultado)] += 1
+            self.por_operacion[(operacion, resultado)] += 1
+            if resultado == "FALLO_CONEXION":
+                self.caida_desde.setdefault(terminal, ahora)
+            elif resultado in RESULTADOS_EXITO and terminal in self.caida_desde:
+                self.episodios[terminal].append((self.caida_desde.pop(terminal), ahora))
+            self.escritor.writerow([datetime.fromtimestamp(ahora).isoformat(timespec="milliseconds"),
+                                    hilo, terminal, operacion, intento, resultado, sqlstate,
+                                    "%.1f" % ms, id_generado if id_generado is not None else "", detalle])
+            self.archivo.flush()
+
+
+# --------------------------------------------------------------------------------------
+# Operaciones
+# --------------------------------------------------------------------------------------
+def _candidato(cur, estados):
+    cur.execute(SQL_CANDIDATO, (list(estados),))
+    fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
+def ejecutar(conn, operacion, datos, rng, args_ingreso):
+    """Una operacion completa en una transaccion. Devuelve (resultado, id_generado, detalle)."""
+    cur = conn.cursor()
+    try:
+        if operacion == "ingresar":
+            cur.execute(SQL_INGRESAR, args_ingreso)
+            id_gen = cur.fetchone()[0]
+            conn.commit()
+            return "OK", id_gen, args_ingreso[3]
+
+        estados = {"despachar": ESTADOS_ACTIVOS, "retener": ESTADOS_ACTIVOS,
+                   "revisar": ESTADOS_REVISION, "liberar": (ESTADO_RETENIDO,)}[operacion]
+        contenedor = _candidato(cur, estados)       # la fila queda bloqueada hasta el commit
+        if contenedor is None:
+            conn.rollback()
+            return "SIN_CANDIDATO", None, operacion
+
+        if operacion == "despachar":
+            cur.execute(SQL_DESPACHAR, (contenedor, rng.choice(datos["licencias"]),
+                                        "Despacho generado por prueba de carga"))
+            id_gen = cur.fetchone()[0]
+        else:
+            tipo, resultado = {"retener": (3, "RETENIDO"), "liberar": (4, "AUTORIZADO"),
+                               "revisar": (2, "CONFORME")}[operacion]
+            cur.execute(SQL_INSPECCION, (contenedor, tipo, rng.choice(datos["agentes"]), resultado,
+                                         "%s generado por prueba de carga" % operacion))
+            id_gen = cur.fetchone()[0]
+        conn.commit()
+        return "OK", id_gen, "contenedor %s" % contenedor
+    finally:
+        cur.close()
+
+
+def _rollback(conn):
+    try:
+        if conn is not None and not getattr(conn, "closed", 0):
+            conn.rollback()
+    except Exception:
+        pass
+
+
+def _cerrar(conn):
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
+
+
+def hilo_trabajo(numero, terminal, ctx):
+    a = ctx.args
+    rng = random.Random(a.semilla * 1000 + numero) if a.semilla is not None else random.Random()
+    datos = ctx.datos[terminal]
+    operaciones, pesos = zip(*ctx.mezcla.items())
+    conn = None
+    while ctx.tomar_operacion():
+        operacion = rng.choices(operaciones, weights=pesos)[0]
+        args_ingreso = (generar_manifiesto(terminal, ctx.contadores, rng, datos["imos"], datos["licencias"])
+                        if operacion == "ingresar" else None)    # se genera UNA vez: los reintentos repiten el mismo manifiesto
+        inicio_op = time.monotonic()
+        intento, incierto = 0, False
+        while True:
+            intento += 1
+            t_ini = time.perf_counter()
             try:
-                conn = conexiones.get((t, i)) or conectar(ruta)
-                conexiones[(t, i)] = conn
-                with conn.cursor() as cur:
-                    cur.execute(sql, op)
-                conn.commit()
-                ctx.registrar(n, t, ruta, intento, "OK", (time.perf_counter() - inicio) * 1000)
+                if conn is None or getattr(conn, "closed", 0):
+                    conn = ctx.conectar(terminal)
+                resultado, id_gen, detalle = ejecutar(conn, operacion, datos, rng, args_ingreso)
+                ctx.registrar(numero, terminal, operacion, intento, resultado, "",
+                              (time.perf_counter() - t_ini) * 1000, id_gen, detalle)
+                if resultado == "SIN_CANDIDATO":
+                    time.sleep(0.2)
                 break
-            except psycopg2.Error as e:
-                ms = (time.perf_counter() - inicio) * 1000
-                detalle = (str(e).strip().splitlines() or [type(e).__name__])[0][:160]
-                if conn is not None:
-                    try:
-                        conn.rollback()
-                    except psycopg2.Error:
-                        pass
-                if getattr(e, "pgcode", None) in CODIGOS_REINTENTABLES:
-                    # psycopg2 los clasifica como OperationalError: sin esta rama se tomarian por
-                    # una caida de nodo y se redirigiria al standby (solo lectura) sin motivo.
-                    ctx.registrar(n, t, ruta, intento, "REINTENTO", ms, detalle)
-                    time.sleep(0.05 * intento)
+            except Exception as exc:        # noqa: BLE001 - se clasifica abajo
+                ms = (time.perf_counter() - t_ini) * 1000
+                _rollback(conn)
+                tipo, codigo, detalle = clasificar(exc), getattr(exc, "pgcode", None) or "", resumen_error(exc)
+                agotado = ctx.parar.is_set() or (time.monotonic() - inicio_op) > a.espera_max
+                if tipo == "REINTENTAR":
+                    ctx.registrar(numero, terminal, operacion, intento, "REINTENTO", codigo, ms, None, detalle)
+                    if agotado:
+                        ctx.registrar(numero, terminal, operacion, intento, "DESCARTADA", codigo, ms, None, detalle)
+                        break
+                    time.sleep(min(0.05 * intento, 0.5))
                     continue
-                if es_de_conexion(e):
-                    if conn is not None:
-                        try:
-                            conn.close()
-                        except psycopg2.Error:
-                            pass
-                    conexiones.pop((t, i), None)
-                    ctx.registrar(n, t, ruta, intento, "FALLO", ms, detalle)
-                    ctx.enr.fallo(t, i)                       # redirige al otro extremo
-                    time.sleep(min(ctx.args.espera * intento, 5))
-                else:                                          # error de datos: no se reintenta
-                    ctx.registrar(n, t, ruta, intento, "ERROR_DATOS", ms, detalle)
+                if tipo == "RECONECTAR":
+                    incierto = True             # puede haberse confirmado antes de perder la conexion
+                    _cerrar(conn)
+                    conn = None
+                    ctx.registrar(numero, terminal, operacion, intento, "FALLO_CONEXION", codigo, ms, None, detalle)
+                    if agotado:
+                        ctx.registrar(numero, terminal, operacion, intento, "DESCARTADA", codigo, ms, None, detalle)
+                        break
+                    time.sleep(min(0.5 * intento, 3.0))
+                    continue
+                if tipo == "DUPLICADO" and operacion == "ingresar" and incierto:
+                    # el numero de manifiesto es unico por construccion: el duplicado es nuestro intento anterior
+                    ctx.registrar(numero, terminal, operacion, intento, "OK_VERIFICADO", codigo, ms, None, args_ingreso[3])
                     break
-        else:
-            ctx.registrar(n, t, ctx.enr.activa(t)[1], ctx.args.intentos, "DESCARTADA", 0,
-                          "agotados los reintentos")
-    for c in conexiones.values():
+                resultado = "RECHAZADA" if tipo in ("NEGOCIO", "DUPLICADO") else "ERROR_OTRO"
+                ctx.registrar(numero, terminal, operacion, intento, resultado, codigo, ms, None, detalle)
+                break
+    _cerrar(conn)
+
+
+# --------------------------------------------------------------------------------------
+# Configuracion
+# --------------------------------------------------------------------------------------
+def cargar_enrutamiento(ruta):
+    with open(ruta, encoding="utf-8") as f:
+        enr = json.load(f)
+    if not enr.get("terminales"):
+        raise ValueError("El archivo de enrutamiento no define 'terminales'")
+    return enr
+
+
+def construir_dsn(enr, terminal, usuario, clave, usar_rls):
+    nodos = enr["terminales"][str(terminal)]["nodos"]
+    partes = [n.rsplit(":", 1) for n in nodos]
+    opciones = "-c statement_timeout=15000"
+    if usar_rls:
+        opciones += " -c app.terminal_asignada=%d" % terminal       # lo usa la politica RLS de ManifiestoCarga
+    dsn = dict(host=",".join(p[0] for p in partes), port=",".join(p[1] for p in partes),
+               dbname=enr.get("base_datos", "puerto"), user=usuario,
+               target_session_attrs="read-write", connect_timeout=3,
+               keepalives=1, keepalives_idle=5, keepalives_interval=2, keepalives_count=3,
+               tcp_user_timeout=8000, application_name="generador_T%d" % terminal, options=opciones)
+    if clave:
+        dsn["password"] = clave
+    return dsn
+
+
+def parsear_mezcla(texto):
+    mezcla = {}
+    for par in texto.split(","):
+        nombre, peso = par.split("=")
+        nombre = nombre.strip()
+        if nombre not in ("ingresar", "despachar", "retener", "liberar", "revisar"):
+            raise ValueError("Operacion desconocida en --mezcla: %s" % nombre)
+        if float(peso) > 0:
+            mezcla[nombre] = float(peso)
+    if not mezcla:
+        raise ValueError("--mezcla no tiene operaciones con peso > 0")
+    return mezcla
+
+
+def repartir_hilos(total, terminales, pesos):
+    suma = sum(pesos[t] for t in terminales)
+    return {t: max(1, round(total * pesos[t] / suma)) for t in terminales if pesos[t] > 0}
+
+
+def clave_desde_entorno(usuario):
+    for nombre in ("GEN_CLAVE", "OPERADOR_PASS") + (("POSTGRES_PASSWORD",) if usuario == "postgres" else ()):
+        if os.environ.get(nombre):
+            return os.environ[nombre]
+    return None
+
+
+def cargar_datos_terminal(ctx, terminal):
+    """Catalogos y numeracion de partida, leidos del nodo de la terminal (reintenta hasta --espera-max)."""
+    limite = time.monotonic() + ctx.args.espera_max
+    while True:
         try:
-            c.close()
-        except psycopg2.Error:
-            pass
+            conn = ctx.conectar(terminal)
+            break
+        except Exception as exc:            # noqa: BLE001
+            if time.monotonic() > limite:
+                raise RuntimeError("No se pudo conectar a la terminal %d: %s" % (terminal, resumen_error(exc)))
+            time.sleep(1)
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT "CT_NumeroImo" FROM puerto."Buque"')
+        imos = [f[0].strip() for f in cur.fetchall()]
+        cur.execute('SELECT "CI_IdAgenteAduanero", "CT_CodigoLicencia" FROM puerto."AgenteAduanero" WHERE "CB_Activo"')
+        filas = cur.fetchall()
+        cur.execute("""SELECT COALESCE(max(substring("CT_NumeroManifiesto" from '[0-9]+$')::int), 0)
+                         FROM puerto."ManifiestoCarga" """)
+        ult_m = cur.fetchone()[0]
+        cur.execute("""SELECT COALESCE(max(substring("CT_NumeroIso" from 5 for 6)::int), 0)
+                         FROM puerto."Contenedor" """)
+        ult_i = cur.fetchone()[0]
+        conn.rollback()
+    finally:
+        conn.close()
+    if not imos or not filas:
+        raise RuntimeError("La terminal %d no tiene buques o agentes activos: cargue los datos primero" % terminal)
+    ctx.datos[terminal] = {"imos": imos, "agentes": [f[0] for f in filas], "licencias": [f[1] for f in filas]}
+    ctx.contadores.iniciar(terminal, ult_m, ult_i)
 
 
-# ----------------------------------------------------------------------------- arranque
-def cargar_contenedores(enr, limite):
-    """IDs de contenedores existentes de cada terminal (lee del primario o, si cae, del standby)."""
-    res = {}
-    for t, rutas in enr.rutas.items():
-        for ruta in rutas:
-            try:
-                conn = conectar(ruta)
-                with conn.cursor() as cur:
-                    cur.execute('SELECT "CI_IdContenedor" FROM puerto."Contenedor" '
-                                "ORDER BY random() LIMIT %s", (limite,))
-                    ids = [r[0] for r in cur.fetchall()]
-                conn.close()
-                if ids:
-                    res[t] = ids
-                    break
-            except psycopg2.Error as e:
-                print(f"  aviso: terminal {t} {ruta[2]}:{ruta[1]} no disponible ({str(e).splitlines()[0]})")
-    return res
+def mostrar_ejemplo(enr, terminales, usuario, clave, a, mezcla, hilos):
+    print("Enrutamiento:", a.enrutamiento)
+    for t in terminales:
+        d = dict(construir_dsn(enr, t, usuario, clave, not a.sin_rls))
+        if "password" in d:
+            d["password"] = "********"
+        print("  Terminal %d (%s) hilos=%s: %s" % (t, NOMBRE_TERMINAL.get(t, "?"), hilos.get(t, 0), d))
+    print("Mezcla de operaciones:", mezcla)
+    c, rng = Contadores(), random.Random(1)
+    c.iniciar(1, 300, 1800)
+    args = generar_manifiesto(1, c, rng, ["9000031"], ["AA-00001"])
+    print("\nEjemplo de llamada (parametros 1 a 7; el 8.o es el INOUT del identificador generado):")
+    print(SQL_INGRESAR)
+    print(json.dumps({"p_id_terminal": args[0], "p_numero_imo": args[1], "p_licencia_agente": args[2],
+                      "p_numero_manifiesto": args[3], "p_puerto_origen": args[4],
+                      "p_fecha_arribo": args[5].isoformat(), "p_contenedores": json.loads(args[6])},
+                     indent=2, ensure_ascii=False))
+    print("\nOtras sentencias:\n ", SQL_DESPACHAR, "\n ", SQL_CANDIDATO, "\n ", SQL_INSPECCION)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Generador de carga concurrente para la prueba de estres")
-    ap.add_argument("--hilos", type=int, default=8)
-    ap.add_argument("--duracion", type=int, default=60, help="segundos (ignorado si se da --total)")
-    ap.add_argument("--total", type=int, default=0, help="operaciones a intentar en total")
-    ap.add_argument("--pesos", default="3,2,1", help="reparto por terminal 1,2,3 (por defecto 3,2,1)")
-    ap.add_argument("--modo", choices=["insert", "llamada"], default="insert")
-    ap.add_argument("--llamada", help="sentencia con parametros con nombre (modo llamada)")
-    ap.add_argument("--intentos", type=int, default=8, help="reintentos por operacion")
-    ap.add_argument("--espera", type=float, default=0.5, help="espera base entre reintentos (s)")
-    ap.add_argument("--enrutamiento", help="JSON con las rutas (ver cabecera); por defecto, puertos congelados")
-    ap.add_argument("--semilla", type=int, default=42)
-    ap.add_argument("--log", help="archivo CSV de registro (por defecto pruebas/log_generador_<fecha>.csv)")
-    args = ap.parse_args()
-    if args.modo == "llamada" and not args.llamada:
-        sys.exit("El modo 'llamada' requiere --llamada con la sentencia del Rol 3.")
+def imprimir_resumen(ctx, terminales, duracion, ruta_log):
+    columnas = ["OK", "OK_VERIFICADO", "RECHAZADA", "REINTENTO", "FALLO_CONEXION", "DESCARTADA",
+                "ERROR_OTRO", "SIN_CANDIDATO"]
+    print("\n=== RESUMEN (%.1f s) ===" % duracion)
+    print("%-9s" % "terminal" + "".join("%15s" % c for c in columnas))
+    for t in terminales:
+        print("%-9s" % NOMBRE_TERMINAL.get(t, t) + "".join("%15d" % ctx.cuenta[(t, c)] for c in columnas))
+    exitos = sum(ctx.cuenta[(t, c)] for t in terminales for c in RESULTADOS_EXITO)
+    print("\nEscrituras confirmadas: %d (%.1f por segundo)" % (exitos, exitos / duracion if duracion else 0))
+    print("Por operacion (confirmadas):",
+          {op: ctx.por_operacion[(op, "OK")] + ctx.por_operacion[(op, "OK_VERIFICADO")] for op in ctx.mezcla})
+    hubo = False
+    for t in terminales:
+        for ini, fin in ctx.episodios[t]:
+            hubo = True
+            print("Terminal %s: caida detectada %s -> primera escritura OK %s (%.1f s)" % (
+                NOMBRE_TERMINAL.get(t, t), datetime.fromtimestamp(ini).strftime("%H:%M:%S"),
+                datetime.fromtimestamp(fin).strftime("%H:%M:%S"), fin - ini))
+        if t in ctx.caida_desde:
+            hubo = True
+            print("Terminal %s: caida detectada %s y SIN recuperacion al terminar" % (
+                NOMBRE_TERMINAL.get(t, t), datetime.fromtimestamp(ctx.caida_desde[t]).strftime("%H:%M:%S")))
+    if not hubo:
+        print("No se detectaron caidas de conexion.")
+    print("Registro detallado:", ruta_log)
+    print("Compare las 'Escrituras confirmadas' con el conteo de filas en el nodo tras el failover.")
 
-    enr = Enrutador(construir_rutas(args.enrutamiento))
-    print("Leyendo contenedores existentes de cada terminal...")
-    contenedores = cargar_contenedores(enr, 5000)
-    if not contenedores:
-        sys.exit("No se pudo leer ningun nodo. Verifique que los nodos esten arriba y PGPASSWORD definido.")
-    log = args.log or os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   f"log_generador_{datetime.now():%Y%m%d_%H%M%S}.csv")
-    ctx = Contexto(args, enr, contenedores, log)
-    print(f"Terminales activas: {', '.join(NOMBRE_TERMINAL[t] for t in ctx.terminales)} | "
-          f"hilos={args.hilos} modo={args.modo} | log: {log}")
 
-    signal.signal(signal.SIGINT, lambda *_: ctx.parar.set())
-    inicio = time.time()
-    hilos = [threading.Thread(target=hilo_trabajo, args=(n, ctx), daemon=True) for n in range(args.hilos)]
-    for h in hilos:
-        h.start()
+def main(argv=None):
+    p = argparse.ArgumentParser(description="Generador de carga concurrente para la prueba de estres")
+    p.add_argument("--enrutamiento", default=str(ENRUTAMIENTO_DEFECTO), help="JSON del Rol 2 (infra/enrutamiento.json)")
+    p.add_argument("--usuario", default=os.environ.get("GEN_USUARIO", "operador_user"))
+    p.add_argument("--hilos", type=int, default=6, help="hilos en total, repartidos segun --pesos")
+    p.add_argument("--pesos", default="3,2,1", help="peso de las terminales 1,2,3 (reparto de hilos)")
+    p.add_argument("--duracion", type=float, default=None, help="segundos (por defecto 60 si no se da --total)")
+    p.add_argument("--total", type=int, default=None, help="operaciones totales (alternativa a --duracion)")
+    p.add_argument("--mezcla", default=MEZCLA_DEFECTO)
+    p.add_argument("--espera-max", dest="espera_max", type=float, default=90.0,
+                   help="segundos que se insiste en una operacion antes de descartarla")
+    p.add_argument("--semilla", type=int, default=None)
+    p.add_argument("--log", default=None)
+    p.add_argument("--sin-rls", dest="sin_rls", action="store_true", help="no fijar app.terminal_asignada")
+    p.add_argument("--solo-ejemplo", dest="solo_ejemplo", action="store_true")
+    a = p.parse_args(argv)
 
-    ultimo = 0
-    while any(h.is_alive() for h in hilos):
-        time.sleep(0.5)
-        t_actual = time.time() - inicio
-        if not args.total and t_actual >= args.duracion:
-            ctx.parar.set()
-        if t_actual - ultimo >= 5:
-            ultimo = t_actual
-            with ctx.lock:
-                ok = sum(v for (t, r), v in ctx.cuenta.items() if r == "OK")
-                fallos = sum(v for (t, r), v in ctx.cuenta.items() if r == "FALLO")
-            print(f"[{t_actual:6.1f}s] OK={ok}  FALLO={fallos}")
-    for h in hilos:
-        h.join()
-    ctx.f.close()
+    enr = cargar_enrutamiento(a.enrutamiento)
+    terminales = sorted(int(k) for k in enr["terminales"])
+    pesos = dict(zip(terminales, [float(x) for x in a.pesos.split(",")]))
+    mezcla = parsear_mezcla(a.mezcla)
+    hilos = repartir_hilos(a.hilos, terminales, pesos)
+    terminales = [t for t in terminales if t in hilos]
+    clave = clave_desde_entorno(a.usuario)
+    if a.total is None and a.duracion is None:
+        a.duracion = 60.0
 
-    dur = time.time() - inicio
-    print("\n=== RESUMEN ===")
-    print(f"{'terminal':<10}{'OK':>8}{'FALLO':>8}{'ERROR_DATOS':>13}{'DESCARTADA':>12}{'REINTENTO':>11}")
-    for t in ctx.terminales:
-        c = [ctx.cuenta[(t, r)] for r in ("OK", "FALLO", "ERROR_DATOS", "DESCARTADA", "REINTENTO")]
-        print(f"{NOMBRE_TERMINAL[t]:<10}{c[0]:>8}{c[1]:>8}{c[2]:>13}{c[3]:>12}{c[4]:>11}")
-    total_ok = sum(v for (t, r), v in ctx.cuenta.items() if r == "OK")
-    print(f"Duracion: {dur:.1f}s | OK totales: {total_ok} | {total_ok / dur:.1f} ops/s")
-    for t, t0 in ctx.primer_fallo.items():
-        if t in ctx.recuperado:
-            print(f"{NOMBRE_TERMINAL[t]}: primer fallo -> primera escritura OK en "
-                  f"{ctx.recuperado[t] - t0:.1f}s (recuperacion/redireccion)")
-        else:
-            print(f"{NOMBRE_TERMINAL[t]}: hubo fallos y NO se recupero durante la prueba")
+    if a.solo_ejemplo:
+        mostrar_ejemplo(enr, terminales, a.usuario, clave, a, mezcla, hilos)
+        return 0
+    if psycopg2 is None:
+        print("Falta el driver: pip install -r requirements.txt", file=sys.stderr)
+        return 2
+
+    ruta_log = a.log or str(RAIZ / "pruebas" / ("log_generador_%s.csv" % datetime.now().strftime("%Y%m%d_%H%M%S")))
+    with open(ruta_log, "w", newline="", encoding="utf-8") as archivo:
+        escritor = csv.writer(archivo)
+        escritor.writerow(["timestamp", "hilo", "terminal", "operacion", "intento", "resultado",
+                           "sqlstate", "ms", "id_generado", "detalle"])
+        dsn = {t: construir_dsn(enr, t, a.usuario, clave, not a.sin_rls) for t in terminales}
+        ctx = Contexto(a, dsn, mezcla, escritor, archivo)
+        signal.signal(signal.SIGINT, lambda *_: ctx.parar.set())
+        try:
+            for t in terminales:
+                cargar_datos_terminal(ctx, t)
+        except RuntimeError as exc:
+            print("ERROR:", exc, file=sys.stderr)
+            return 1
+
+        print("Generador iniciado: hilos=%s mezcla=%s log=%s" % (hilos, mezcla, ruta_log))
+        trabajadores, n = [], 0
+        for t in terminales:
+            for _ in range(hilos[t]):
+                n += 1
+                th = threading.Thread(target=hilo_trabajo, args=(n, t, ctx), daemon=True)
+                th.start()
+                trabajadores.append(th)
+
+        ctx.t0 = time.time()
+        siguiente_aviso = ctx.t0 + 5
+        while any(th.is_alive() for th in trabajadores) and not ctx.parar.is_set():
+            time.sleep(0.2)
+            ahora = time.time()
+            if a.duracion is not None and ahora - ctx.t0 >= a.duracion:
+                ctx.parar.set()
+            if ahora >= siguiente_aviso:
+                siguiente_aviso += 5
+                ok = {t: ctx.cuenta[(t, "OK")] + ctx.cuenta[(t, "OK_VERIFICADO")] for t in terminales}
+                fallos = {t: ctx.cuenta[(t, "FALLO_CONEXION")] for t in terminales}
+                print("[%5.0fs] OK=%s FALLO_CONEXION=%s" % (ahora - ctx.t0, ok, fallos))
+        ctx.parar.set()
+        for th in trabajadores:
+            th.join(timeout=a.espera_max + 5)
+        imprimir_resumen(ctx, terminales, time.time() - ctx.t0, ruta_log)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
