@@ -20,6 +20,16 @@ x-pg: &pg
     - "max_prepared_transactions=20"
     - "-c"
     - "shared_buffers=128MB"
+    - "-c"
+    - "ssl=on"
+    - "-c"
+    - "ssl_cert_file=/etc/ssl/postgres/server.crt"
+    - "-c"
+    - "ssl_key_file=/etc/ssl/postgres/server.key"
+    - "-c"
+    - "ssl_min_protocol_version=TLSv1.2"
+    - "-c"
+    - "password_encryption=scram-sha-256"
   healthcheck:
     test: ["CMD-SHELL", "pg_isready -U postgres -d puerto"]
     interval: 3s
@@ -38,37 +48,37 @@ services:
     hostname: nodo1
     ports: ["5441:5432"]
     environment: {<<: *pgenv, MODO: "${N1_MODO:-primario}", PEER: "${N1_PEER:-nodo1sb}", SLOT: slot_nodo1}
-    volumes: [nodo1_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "../datos:/datos:ro"]
+    volumes: [nodo1_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "./ssl:/ssl_src:ro", "../sql/05_seguridad:/seguridad:ro", "../datos:/datos:ro"]
   nodo1sb:
     <<: *pg
     hostname: nodo1sb
     ports: ["5451:5432"]
     environment: {<<: *pgenv, MODO: "${N1SB_MODO:-standby}", PEER: nodo1, SLOT: slot_nodo1sb}
-    volumes: [nodo1sb_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "../datos:/datos:ro"]
+    volumes: [nodo1sb_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "./ssl:/ssl_src:ro", "../sql/05_seguridad:/seguridad:ro", "../datos:/datos:ro"]
   nodo2:
     <<: *pg
     hostname: nodo2
     ports: ["5442:5432"]
     environment: {<<: *pgenv, MODO: "${N2_MODO:-primario}", PEER: "${N2_PEER:-nodo2sb}", SLOT: slot_nodo2}
-    volumes: [nodo2_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "../datos:/datos:ro"]
+    volumes: [nodo2_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "./ssl:/ssl_src:ro", "../sql/05_seguridad:/seguridad:ro", "../datos:/datos:ro"]
   nodo2sb:
     <<: *pg
     hostname: nodo2sb
     ports: ["5452:5432"]
     environment: {<<: *pgenv, MODO: "${N2SB_MODO:-standby}", PEER: nodo2, SLOT: slot_nodo2sb}
-    volumes: [nodo2sb_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "../datos:/datos:ro"]
+    volumes: [nodo2sb_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "./ssl:/ssl_src:ro", "../sql/05_seguridad:/seguridad:ro", "../datos:/datos:ro"]
   nodo3:
     <<: *pg
     hostname: nodo3
     ports: ["5443:5432"]
     environment: {<<: *pgenv, MODO: "${N3_MODO:-primario}", PEER: "${N3_PEER:-nodo3sb}", SLOT: slot_nodo3}
-    volumes: [nodo3_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "../datos:/datos:ro"]
+    volumes: [nodo3_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "./ssl:/ssl_src:ro", "../sql/05_seguridad:/seguridad:ro", "../datos:/datos:ro"]
   nodo3sb:
     <<: *pg
     hostname: nodo3sb
     ports: ["5453:5432"]
     environment: {<<: *pgenv, MODO: "${N3SB_MODO:-standby}", PEER: nodo3, SLOT: slot_nodo3sb}
-    volumes: [nodo3sb_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "../datos:/datos:ro"]
+    volumes: [nodo3sb_data:/var/lib/postgresql/data, "./entrypoint.sh:/entrypoint.sh:ro", "./init:/docker-entrypoint-initdb.d:ro", "./ssl:/ssl_src:ro", "../sql/05_seguridad:/seguridad:ro", "../datos:/datos:ro"]
 
 networks:
   portuaria_net: {name: portuaria_net}

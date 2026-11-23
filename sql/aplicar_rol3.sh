@@ -2,6 +2,7 @@
 # =====================================================================
 # Aplica rutinas transaccionales, triggers y seguridad (Rol 3) en los
 # 3 primarios activos del cluster (los 3 standbys lo reciben por WAL).
+# Estándar: Tablas PascalCase y columnas CI_/CT_/CB_/CD_/CF_
 # Uso: bash sql/aplicar_rol3.sh
 # =====================================================================
 set -e
@@ -55,6 +56,9 @@ for N in 1 2 3; do
     < "$ROOT_DIR/sql/04_rutinas/03_triggers_inventario_y_pesos.sql"
 
   docker compose exec -T "$P" psql -U postgres -d puerto -v ON_ERROR_STOP=1 -v nodo="$N" \
+    < "$ROOT_DIR/sql/04_rutinas/04_sp_registrar_inspeccion.sql"
+
+  docker compose exec -T "$P" psql -U postgres -d puerto -v ON_ERROR_STOP=1 -v nodo="$N" \
     -v enc_key="$ENC_KEY" \
     -v auditor_pass="$AUDITOR_PASS" \
     -v operador_pass="$OPERADOR_PASS" \
@@ -65,7 +69,7 @@ done
 echo "==================================================="
 echo " Verificando integridad y replicacion en los 6 nodos"
 echo "==================================================="
-CONTEOS_SQL="SELECT (SELECT count(*) FROM puerto.manifiesto_carga)||','||(SELECT count(*) FROM puerto.contenedor)||','||(SELECT count(*) FROM puerto.detalle_mercancia)||','||(SELECT count(*) FROM puerto.inspeccion_transito)"
+CONTEOS_SQL='SELECT (SELECT count(*) FROM puerto."ManifiestoCarga")||$$,$$||(SELECT count(*) FROM puerto."Contenedor")||$$,$$||(SELECT count(*) FROM puerto."DetalleMercancia")||$$,$$||(SELECT count(*) FROM puerto."InspeccionTransito")'
 for N in 1 2 3; do
   P=$(primario_de "$N")
   if [ "$P" = "nodo$N" ]; then S="nodo${N}sb"; else S="nodo$N"; fi

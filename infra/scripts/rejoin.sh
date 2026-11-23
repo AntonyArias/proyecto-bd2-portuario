@@ -15,7 +15,7 @@ fi
 echo "Esperando a que $D quede en streaming..."
 s=0
 for i in $(seq 1 40); do
-  s=$(docker compose exec -T $P psql -U postgres -Atc "select count(*) from pg_stat_replication where state='streaming'" 2>/dev/null || echo 0)
+  s=$(docker compose exec -T $P psql -U postgres -Atc "select count(*) from pg_stat_replication where state='streaming'" 2>/dev/null | tr -d '\r' || echo 0)
   [ "$s" = "1" ] && break
   sleep 3
 done

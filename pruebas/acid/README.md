@@ -24,7 +24,7 @@ set -a; source infra/.env; set +a
 ```
 
 ### 1. Atomicidad (`01_atomicidad.sql`) — *Error a mitad = Rollback completo*
-Invoca `puerto.sp_ingresar_manifiesto` con **2 contenedores**: el #1 es válido y se inserta temporalmente, pero el #2 excede `peso_max_kg` y dispara el trigger de sobrepeso. Se comprueba que no quedan manifiestos ni contenedores parciales/huérfanos (`0` filas residuales).
+Invoca `puerto.sp_ingresar_manifiesto` con **2 contenedores**: el #1 es válido y se inserta temporalmente, pero el #2 excede `"CD_PesoMaxKg"` y dispara el trigger de sobrepeso. Se comprueba que no quedan manifiestos ni contenedores parciales/huérfanos (`0` filas residuales).
 
 ```bash
 docker compose -f infra/docker-compose.yml exec -T -e PGPASSWORD="$OPERADOR_PASS" nodo1 \

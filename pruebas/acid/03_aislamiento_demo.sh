@@ -12,7 +12,6 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 set -a; . infra/.env; set +a
 
-# Detectar primario actual del fragmento 1
 NODO="nodo1"
 for h in nodo1 nodo1sb; do
   r=$(docker compose -f infra/docker-compose.yml exec -T "$h" psql -U postgres -d puerto -Atc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d '\r' || true)
@@ -21,7 +20,7 @@ done
 
 ID_CONT=$(docker compose -f infra/docker-compose.yml exec -T -e PGPASSWORD="$OPERADOR_PASS" "$NODO" \
   psql -U operador_user -d puerto -qAtc \
-  "SELECT id_contenedor FROM puerto.contenedor WHERE id_estado_contenedor IN (2,3,4,6) ORDER BY id_contenedor LIMIT 1;" | tr -d '\r')
+  'SELECT "CI_IdContenedor" FROM puerto."Contenedor" WHERE "CI_IdEstadoContenedor" IN (2,3,4,6) ORDER BY "CI_IdContenedor" LIMIT 1;' | tr -d '\r')
 
 echo "====================================================================="
 echo " DEMO AISLAMIENTO: 2 sesiones simultáneas sobre contenedor $ID_CONT en $NODO"
@@ -31,7 +30,6 @@ LOG_S1=$(mktemp)
 LOG_S2=$(mktemp)
 trap 'rm -f "$LOG_S1" "$LOG_S2"' EXIT
 
-# 1. Lanzar Sesión 1 en segundo plano (retiene FOR UPDATE por 5 segundos)
 docker compose -f infra/docker-compose.yml exec -T -e PGPASSWORD="$OPERADOR_PASS" "$NODO" \
   psql -U operador_user -d puerto -v id_cont="$ID_CONT" -v espera_seg=5 \
   < pruebas/acid/03_aislamiento_sesion1.sql > "$LOG_S1" 2>&1 &
@@ -39,7 +37,6 @@ PID_S1=$!
 
 sleep 1.2
 
-# 2. Lanzar Sesión 2 en paralelo apuntando al MISMO contenedo
 docker compose -f infra/docker-compose.yml exec -T -e PGPASSWORD="$OPERADOR_PASS" "$NODO" \
   psql -U operador_user -d puerto -v id_cont="$ID_CONT" \
   < pruebas/acid/03_aislamiento_sesion2.sql > "$LOG_S2" 2>&1 &

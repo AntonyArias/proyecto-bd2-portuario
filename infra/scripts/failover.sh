@@ -7,7 +7,7 @@ if P=$(bash scripts/primario_actual.sh $N 2>/dev/null); then
 fi
 S=""
 for h in nodo$N nodo${N}sb; do
-  r=$(docker compose exec -T $h psql -U postgres -d puerto -Atc "select pg_is_in_recovery()" 2>/dev/null || true)
+  r=$(docker compose exec -T $h psql -U postgres -d puerto -Atc "select pg_is_in_recovery()" 2>/dev/null | tr -d '\r' || true)
   [ "$r" = "t" ] && S=$h
 done
 [ -n "$S" ] || { echo "No hay standby vivo en el fragmento $N"; exit 1; }

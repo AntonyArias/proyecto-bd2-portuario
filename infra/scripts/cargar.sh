@@ -1,6 +1,7 @@
 #!/bin/bash
 # Carga DDL + DML + verificacion en los 3 primarios. Correr desde infra/ con los 6 contenedores arriba.
 set -e
+export MSYS_NO_PATHCONV=1
 for N in 1 2 3; do
   echo "=== nodo $N ==="
   docker compose exec -T nodo$N psql -U postgres -d puerto -q -v nodo=$N -f /datos/01_ddl.sql

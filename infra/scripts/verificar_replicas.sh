@@ -1,5 +1,6 @@
 #!/bin/bash
 # Estado de replicacion + 03_verificacion.sql corrido contra cada standby (solo lectura).
+export MSYS_NO_PATHCONV=1
 for N in 1 2 3; do
   echo "=== nodo $N: pg_stat_replication ==="
   docker compose exec -T nodo$N psql -U postgres -c "select application_name,state,sync_state,replay_lag from pg_stat_replication"

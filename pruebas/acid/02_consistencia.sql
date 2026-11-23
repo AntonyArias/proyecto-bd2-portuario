@@ -1,10 +1,7 @@
 -- =====================================================================
 -- PRUEBA ACID 2: CONSISTENCIA (Preservación de invariantes y restricciones)
 -- Proyecto: Sistema de Logística Portuaria y Aduanera (Rol 3)
--- Duración estimada: ~5 segundos
--- Cómo correr desde la raíz del repo:
---   docker compose -f infra/docker-compose.yml exec -T -e PGPASSWORD="$OPERADOR_PASS" nodo1 \
---     psql -U operador_user -d puerto -f - < pruebas/acid/02_consistencia.sql
+-- Estándar: Tablas PascalCase y columnas CI_/CT_/CB_/CD_/CF_
 -- =====================================================================
 
 \pset pager off
@@ -14,11 +11,11 @@ SET search_path = puerto, public;
 \echo ' PRUEBA 2 - CONSISTENCIA (Restricciones CHECK, FK, Triggers y Reglas)'
 \echo '====================================================================='
 
-SELECT numero_imo AS imo_test FROM puerto.buque ORDER BY id_buque LIMIT 1 \gset
-SELECT id_contenedor AS id_cont_retenido, numero_iso AS iso_retenido
-  FROM puerto.contenedor
- WHERE id_estado_contenedor = 5
- ORDER BY id_contenedor
+SELECT "CT_NumeroImo" AS imo_test FROM puerto."Buque" ORDER BY "CI_IdBuque" LIMIT 1 \gset
+SELECT "CI_IdContenedor" AS id_cont_retenido, "CT_NumeroIso" AS iso_retenido
+  FROM puerto."Contenedor"
+ WHERE "CI_IdEstadoContenedor" = 5
+ ORDER BY "CI_IdContenedor"
  LIMIT 1 \gset
 
 \set ON_ERROR_STOP off
@@ -27,8 +24,8 @@ SELECT id_contenedor AS id_cont_retenido, numero_iso AS iso_retenido
 \echo '--- Caso 2A: Violacion de fragmentacion horizontal (insertar terminal 2 Limon en nodo 1 Moin) ---'
 CALL puerto.sp_ingresar_manifiesto(
     2::SMALLINT, :'imo_test', 'AA-00001', 'MAN-T2-ILEGAL01', 'Miami', now(),
-    '[{"id_tipo_contenedor":1,"numero_iso":"LIMU7700010","tara_kg":2200,"peso_max_kg":30480,"requiere_refrigeracion":false,
-       "detalles":[{"id_partida_arancelaria":6,"descripcion":"Carga otra terminal","cantidad":10,"peso_kg":500,"valor_declarado":5000}]}]'::JSONB,
+    '[{"CI_IdTipoContenedor":1,"CT_NumeroIso":"LIMU7700010","CD_TaraKg":2200,"CD_PesoMaxKg":30480,"CB_RequiereRefrigeracion":false,
+       "detalles":[{"CI_IdPartidaArancelaria":6,"CT_Descripcion":"Carga otra terminal","CI_Cantidad":10,"CD_PesoKg":500,"CD_ValorDeclarado":5000}]}]'::JSONB,
     NULL
 );
 
@@ -36,8 +33,8 @@ CALL puerto.sp_ingresar_manifiesto(
 \echo '--- Caso 2B: Violacion de formato ISO 6346 del contenedor (CHECK regex ^[A-Z]{4}[0-9]{7}$) ---'
 CALL puerto.sp_ingresar_manifiesto(
     1::SMALLINT, :'imo_test', 'AA-00001', 'MAN-T1-ISO-MALO', 'Miami', now(),
-    '[{"id_tipo_contenedor":1,"numero_iso":"9999INVALID","tara_kg":2200,"peso_max_kg":30480,"requiere_refrigeracion":false,
-       "detalles":[{"id_partida_arancelaria":6,"descripcion":"ISO invalido","cantidad":10,"peso_kg":500,"valor_declarado":5000}]}]'::JSONB,
+    '[{"CI_IdTipoContenedor":1,"CT_NumeroIso":"9999INVALID","CD_TaraKg":2200,"CD_PesoMaxKg":30480,"CB_RequiereRefrigeracion":false,
+       "detalles":[{"CI_IdPartidaArancelaria":6,"CT_Descripcion":"ISO invalido","CI_Cantidad":10,"CD_PesoKg":500,"CD_ValorDeclarado":5000}]}]'::JSONB,
     NULL
 );
 
@@ -45,8 +42,8 @@ CALL puerto.sp_ingresar_manifiesto(
 \echo '--- Caso 2C: Violacion de regla de cadena de frio (mercancia seca en contenedor refrigerado 20RF) ---'
 CALL puerto.sp_ingresar_manifiesto(
     1::SMALLINT, :'imo_test', 'AA-00001', 'MAN-T1-FRIO-MAL', 'Colon', now(),
-    '[{"id_tipo_contenedor":4,"numero_iso":"MOIU7700099","tara_kg":2300,"peso_max_kg":30480,"requiere_refrigeracion":true,"temperatura_c":2.0,
-       "detalles":[{"id_partida_arancelaria":6,"descripcion":"Laptops en contenedor RF","cantidad":15,"peso_kg":600,"valor_declarado":12000}]}]'::JSONB,
+    '[{"CI_IdTipoContenedor":4,"CT_NumeroIso":"MOIU7700099","CD_TaraKg":2300,"CD_PesoMaxKg":30480,"CB_RequiereRefrigeracion":true,"CD_TemperaturaC":2.0,
+       "detalles":[{"CI_IdPartidaArancelaria":6,"CT_Descripcion":"Laptops en contenedor RF","CI_Cantidad":15,"CD_PesoKg":600,"CD_ValorDeclarado":12000}]}]'::JSONB,
     NULL
 );
 
@@ -69,26 +66,25 @@ SELECT prueba,
        CASE WHEN violaciones = 0 THEN 'OK - CONSISTENTE' ELSE 'FALLA' END AS estado
 FROM (
   SELECT 'manifiestos_de_otra_terminal' AS prueba, count(*) AS violaciones
-    FROM puerto.manifiesto_carga WHERE id_terminal_maritima <> 1
+    FROM puerto."ManifiestoCarga" WHERE "CI_IdTerminalMaritima" <> 1
   UNION ALL
   SELECT 'contenedores_sin_manifiesto', count(*)
-    FROM puerto.contenedor c LEFT JOIN puerto.manifiesto_carga m USING (id_manifiesto_carga)
-   WHERE m.id_manifiesto_carga IS NULL
+    FROM puerto."Contenedor" c LEFT JOIN puerto."ManifiestoCarga" m USING ("CI_IdManifiestoCarga")
+   WHERE m."CI_IdManifiestoCarga" IS NULL
   UNION ALL
   SELECT 'contenedores_sin_detalle', count(*)
-    FROM puerto.contenedor c
-   WHERE NOT EXISTS (SELECT 1 FROM puerto.detalle_mercancia d WHERE d.id_contenedor = c.id_contenedor)
+    FROM puerto."Contenedor" c
+   WHERE NOT EXISTS (SELECT 1 FROM puerto."DetalleMercancia" d WHERE d."CI_IdContenedor" = c."CI_IdContenedor")
   UNION ALL
   SELECT 'sobrepeso_tara_mas_carga', count(*)
-    FROM puerto.contenedor c
-    JOIN (SELECT id_contenedor, sum(peso_kg) AS p FROM puerto.detalle_mercancia GROUP BY 1) d USING (id_contenedor)
-   WHERE c.tara_kg + d.p > c.peso_max_kg
+    FROM puerto."Contenedor" c
+    JOIN (SELECT "CI_IdContenedor", sum("CD_PesoKg") AS p FROM puerto."DetalleMercancia" GROUP BY 1) d USING ("CI_IdContenedor")
+   WHERE c."CD_TaraKg" + d.p > c."CD_PesoMaxKg"
   UNION ALL
   SELECT 'inventario_vs_estado_contenedor', count(*)
-    FROM puerto.detalle_mercancia d JOIN puerto.contenedor c USING (id_contenedor)
-   WHERE (c.id_estado_contenedor = 5 AND d.estado_inventario <> 'BLOQUEADO')
-      OR (c.id_estado_contenedor = 7 AND d.estado_inventario <> 'DESPACHADO')
-      OR (c.id_estado_contenedor NOT IN (5,7) AND d.estado_inventario <> 'DISPONIBLE')
+    FROM puerto."DetalleMercancia" d JOIN puerto."Contenedor" c USING ("CI_IdContenedor")
+   WHERE (c."CI_IdEstadoContenedor" = 5 AND d."CT_EstadoInventario" <> 'BLOQUEADO')
+      OR (c."CI_IdEstadoContenedor" = 7 AND d."CT_EstadoInventario" <> 'DESPACHADO')
+      OR (c."CI_IdEstadoContenedor" NOT IN (5,7) AND d."CT_EstadoInventario" <> 'DISPONIBLE')
 ) q
 ORDER BY prueba;
-

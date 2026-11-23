@@ -1,0 +1,2 @@
+# Directorio para certificados SSL/TLS locales (generados por sql/05_seguridad/generar_ssl.sh).
+# Las llaves privadas (*.key) y certificados locales (*.crt) están en .gitignore.

@@ -21,7 +21,7 @@ BEGIN
     h := format(current_setting('fdw.host_fmt'), n) || ',' || format(current_setting('fdw.host_fmt'), n) || 'sb';
     p := format(current_setting('fdw.port_fmt'), n) || ',' || format(current_setting('fdw.port_fmt'), n);
     EXECUTE format('DROP SERVER IF EXISTS nodo%s CASCADE', n);
-    EXECUTE format('CREATE SERVER nodo%s FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host %L, port %L, dbname %L, connect_timeout %L, target_session_attrs %L)', n, h, p, 'puerto', '3', 'any');
+    EXECUTE format('CREATE SERVER nodo%s FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host %L, port %L, dbname %L, connect_timeout %L, target_session_attrs %L, sslmode %L)', n, h, p, 'puerto', '3', 'any', 'require');
     EXECUTE format('CREATE USER MAPPING FOR postgres SERVER nodo%s OPTIONS (user %L, password %L)', n, 'postgres', current_setting('fdw.pass'));
     EXECUTE format('DROP SCHEMA IF EXISTS fdw_n%s CASCADE', n);
     EXECUTE format('CREATE SCHEMA fdw_n%s', n);
