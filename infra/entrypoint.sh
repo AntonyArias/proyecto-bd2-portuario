@@ -32,7 +32,7 @@ if [ "$MODO" = "standby" ] && [ ! -s "$PGDATA/PG_VERSION" ]; then
 fi
 
 if [ -f "$PGDATA/pg_hba.conf" ] && [ -s /seguridad/pg_hba_seguro.conf ]; then
-  if ! grep -q "hostnossl" "$PGDATA/pg_hba.conf"; then
+  if ! cmp -s /seguridad/pg_hba_seguro.conf "$PGDATA/pg_hba.conf"; then
     cp /seguridad/pg_hba_seguro.conf "$PGDATA/pg_hba.conf"
     chown postgres:postgres "$PGDATA/pg_hba.conf"
     chmod 600 "$PGDATA/pg_hba.conf"
