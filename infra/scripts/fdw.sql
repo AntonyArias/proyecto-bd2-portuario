@@ -1,5 +1,5 @@
--- Vistas globales via postgres_fdw. Se corre con: bash scripts/fdw.sh
--- Cada servidor remoto lista primario y standby (host 'nodoN,nodoNsb'): si el primero cae, usa el segundo.
+-- Vistas globales via postgres_fdw (actualizado a nomenclatura PascalCase / prefijos CI/CT/CB/CD/CF).
+-- Se corre con: bash scripts/fdw.sh
 -- Obligatorias: -v nodo=N -v pass=<clave>. Opcionales: -v host_fmt='nodo%s' -v port_fmt='5432'
 \set ON_ERROR_STOP on
 \if :{?host_fmt} \else \set host_fmt 'nodo%s' \endif
@@ -12,8 +12,10 @@ CREATE SCHEMA global;
 DO $$
 DECLARE
   n int; yo int := current_setting('fdw.nodo')::int; t text; src text; h text; p text;
-  tabs text[] := ARRAY['manifiesto_carga','contenedor','detalle_mercancia','inspeccion_transito'];
+  tabs text[] := ARRAY['ManifiestoCarga','Contenedor','DetalleMercancia','InspeccionTransito'];
+  tabs_quoted text;
 BEGIN
+  SELECT string_agg(quote_ident(x), ',') INTO tabs_quoted FROM unnest(tabs) AS x;
   FOR n IN 1..3 LOOP
     CONTINUE WHEN n = yo;
     h := format(current_setting('fdw.host_fmt'), n) || ',' || format(current_setting('fdw.host_fmt'), n) || 'sb';
@@ -23,7 +25,7 @@ BEGIN
     EXECUTE format('CREATE USER MAPPING FOR postgres SERVER nodo%s OPTIONS (user %L, password %L)', n, 'postgres', current_setting('fdw.pass'));
     EXECUTE format('DROP SCHEMA IF EXISTS fdw_n%s CASCADE', n);
     EXECUTE format('CREATE SCHEMA fdw_n%s', n);
-    EXECUTE format('IMPORT FOREIGN SCHEMA puerto LIMIT TO (%s) FROM SERVER nodo%s INTO fdw_n%s', array_to_string(tabs, ','), n, n);
+    EXECUTE format('IMPORT FOREIGN SCHEMA puerto LIMIT TO (%s) FROM SERVER nodo%s INTO fdw_n%s', tabs_quoted, n, n);
   END LOOP;
   FOREACH t IN ARRAY tabs LOOP
     SELECT string_agg(format('SELECT * FROM %s.%I', CASE WHEN k = yo THEN 'puerto' ELSE 'fdw_n'||k END, t), ' UNION ALL ' ORDER BY k)
@@ -31,5 +33,5 @@ BEGIN
     EXECUTE format('CREATE VIEW global.%I AS %s', t, src);
   END LOOP;
 END $$;
-SELECT id_terminal_maritima AS terminal, count(*) AS manifiestos FROM global.manifiesto_carga GROUP BY 1 ORDER BY 1;
-SELECT id_contenedor/1000000000 AS nodo, count(*) AS contenedores FROM global.contenedor GROUP BY 1 ORDER BY 1;
+SELECT "CI_IdTerminalMaritima" AS terminal, count(*) AS manifiestos FROM global."ManifiestoCarga" GROUP BY 1 ORDER BY 1;
+SELECT "CI_IdContenedor"/1000000000 AS nodo, count(*) AS contenedores FROM global."Contenedor" GROUP BY 1 ORDER BY 1;
