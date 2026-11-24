@@ -1,0 +1,141 @@
+// Diagrama ER generado desde sql/01_ddl/. Pegar en https://dbdiagram.io
+// Gris = catalogos | Azul = entidades comunes | Naranja = fragmentadas por terminal
+
+// ===== CATALOGOS (gris) =====
+Table Pais [headercolor: #6b7280] {
+  CI_IdPais smallint [pk, not null]
+  CT_CodigoIso char(2) [unique, not null]
+  CT_Nombre varchar(60) [not null]
+}
+
+Table TipoContenedor [headercolor: #6b7280] {
+  CI_IdTipoContenedor smallint [pk, not null]
+  CT_Codigo varchar(5) [unique, not null]
+  CT_Descripcion varchar(60) [not null]
+  CI_LongitudPies smallint [not null]
+}
+
+Table EstadoContenedor [headercolor: #6b7280] {
+  CI_IdEstadoContenedor smallint [pk, not null]
+  CT_Codigo varchar(20) [unique, not null]
+  CT_Descripcion varchar(80) [not null]
+}
+
+Table TipoInspeccion [headercolor: #6b7280] {
+  CI_IdTipoInspeccion smallint [pk, not null]
+  CT_Codigo varchar(20) [unique, not null]
+  CT_Descripcion varchar(100) [not null]
+}
+
+Table PartidaArancelaria [headercolor: #6b7280] {
+  CI_IdPartidaArancelaria smallint [pk, not null]
+  CT_CodigoHs varchar(10) [unique, not null]
+  CT_Descripcion varchar(100) [not null]
+  CD_TasaArancelPct numeric(5,2) [not null]
+}
+
+// ===== ENTIDADES COMUNES (azul) =====
+Table TerminalMaritima [headercolor: #2563eb] {
+  CI_IdTerminalMaritima smallint [pk, not null]
+  CT_Codigo varchar(5) [unique, not null]
+  CT_Nombre varchar(80) [not null]
+  CT_Provincia varchar(40) [not null]
+}
+
+Table DependenciaAduanera [headercolor: #2563eb] {
+  CI_IdDependenciaAduanera smallint [pk, not null]
+  CI_IdTerminalMaritima smallint [not null]
+  CT_Codigo varchar(10) [unique, not null]
+  CT_Nombre varchar(80) [not null]
+}
+
+Table Naviera [headercolor: #2563eb] {
+  CI_IdNaviera int [pk, not null]
+  CI_IdPais smallint [not null]
+  CT_Nombre varchar(80) [not null]
+  CT_CedulaJuridica varchar(15) [unique, not null]
+}
+
+Table Buque [headercolor: #2563eb] {
+  CI_IdBuque int [pk, not null]
+  CI_IdNaviera int [not null]
+  CI_IdPaisBandera smallint [not null]
+  CT_Nombre varchar(80) [not null]
+  CT_NumeroImo char(7) [unique, not null]
+  CI_CapacidadTeu int [not null]
+}
+
+Table AgenteAduanero [headercolor: #2563eb] {
+  CI_IdAgenteAduanero int [pk, not null]
+  CT_CodigoLicencia varchar(12) [unique, not null]
+  CT_Nombre varchar(60) [not null]
+  CT_Apellidos varchar(80) [not null]
+  CT_Correo varchar(100) [unique, not null]
+  CT_CedulaEnc bytea [not null, note: 'cifrado']
+  CT_TelefonoEnc bytea [not null, note: 'cifrado']
+  CB_Activo boolean [not null]
+}
+
+// ===== TABLAS FRAGMENTADAS por terminal (naranja) =====
+Table ManifiestoCarga [headercolor: #ea580c] {
+  CI_IdManifiestoCarga bigint [pk, not null]
+  CI_IdTerminalMaritima smallint [not null, note: 'unica columna de fragmento; CHECK = nodo']
+  CI_IdBuque int [not null]
+  CI_IdAgenteAduanero int [not null]
+  CT_NumeroManifiesto varchar(20) [unique, not null]
+  CT_PuertoOrigen varchar(60) [not null]
+  CF_FechaArribo timestamptz [not null]
+  CF_FechaRegistro timestamptz [not null]
+  CT_Estado varchar(20) [not null]
+}
+
+Table Contenedor [headercolor: #ea580c] {
+  CI_IdContenedor bigint [pk, not null]
+  CI_IdManifiestoCarga bigint [not null]
+  CI_IdTipoContenedor smallint [not null]
+  CI_IdEstadoContenedor smallint [not null]
+  CT_NumeroIso char(11) [unique, not null]
+  CD_TaraKg numeric(10,2) [not null]
+  CD_PesoMaxKg numeric(10,2) [not null]
+  CB_RequiereRefrigeracion boolean [not null]
+  CD_TemperaturaC numeric(4,1)
+}
+
+Table DetalleMercancia [headercolor: #ea580c] {
+  CI_IdDetalleMercancia bigint [pk, not null]
+  CI_IdContenedor bigint [not null]
+  CI_IdPartidaArancelaria smallint [not null]
+  CT_Descripcion varchar(120) [not null]
+  CI_Cantidad int [not null]
+  CD_PesoKg numeric(10,2) [not null]
+  CT_ValorDeclaradoEnc bytea [not null, note: 'cifrado']
+  CT_ValorArancelarioEnc bytea [not null, note: 'cifrado']
+  CT_EstadoInventario varchar(12) [not null]
+}
+
+Table InspeccionTransito [headercolor: #ea580c] {
+  CI_IdInspeccionTransito bigint [pk, not null]
+  CI_IdContenedor bigint [not null]
+  CI_IdTipoInspeccion smallint [not null]
+  CI_IdAgenteAduanero int
+  CF_FechaHora timestamptz [not null]
+  CT_Resultado varchar(12) [not null]
+  CT_Observaciones text
+}
+
+// ===== RELACIONES (> = muchos a uno) =====
+Ref: DependenciaAduanera.CI_IdTerminalMaritima > TerminalMaritima.CI_IdTerminalMaritima
+Ref: Naviera.CI_IdPais > Pais.CI_IdPais
+Ref: Buque.CI_IdNaviera > Naviera.CI_IdNaviera
+Ref: Buque.CI_IdPaisBandera > Pais.CI_IdPais
+Ref: ManifiestoCarga.CI_IdTerminalMaritima > TerminalMaritima.CI_IdTerminalMaritima
+Ref: ManifiestoCarga.CI_IdBuque > Buque.CI_IdBuque
+Ref: ManifiestoCarga.CI_IdAgenteAduanero > AgenteAduanero.CI_IdAgenteAduanero
+Ref: Contenedor.CI_IdManifiestoCarga > ManifiestoCarga.CI_IdManifiestoCarga
+Ref: Contenedor.CI_IdTipoContenedor > TipoContenedor.CI_IdTipoContenedor
+Ref: Contenedor.CI_IdEstadoContenedor > EstadoContenedor.CI_IdEstadoContenedor
+Ref: DetalleMercancia.CI_IdContenedor > Contenedor.CI_IdContenedor
+Ref: DetalleMercancia.CI_IdPartidaArancelaria > PartidaArancelaria.CI_IdPartidaArancelaria
+Ref: InspeccionTransito.CI_IdContenedor > Contenedor.CI_IdContenedor
+Ref: InspeccionTransito.CI_IdTipoInspeccion > TipoInspeccion.CI_IdTipoInspeccion
+Ref: InspeccionTransito.CI_IdAgenteAduanero > AgenteAduanero.CI_IdAgenteAduanero

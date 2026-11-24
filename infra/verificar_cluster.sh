@@ -1,7 +1,7 @@
 #!/bin/bash
 # Estado de replicacion, retardo y conteos primario vs standby de cada fragmento. Correr desde infra/.
 cd "$(dirname "$0")/.."
-CONTEOS="select (select count(*) from puerto.manifiesto_carga)||','||(select count(*) from puerto.contenedor)||','||(select count(*) from puerto.detalle_mercancia)||','||(select count(*) from puerto.inspeccion_transito)"
+CONTEOS='select (select count(*) from puerto."ManifiestoCarga")||$$,$$||(select count(*) from puerto."Contenedor")||$$,$$||(select count(*) from puerto."DetalleMercancia")||$$,$$||(select count(*) from puerto."InspeccionTransito")'
 for N in 1 2 3; do
   P=$(bash scripts/primario_actual.sh $N) || { echo "=== Fragmento $N: SIN primario vivo ==="; continue; }
   if [ "$P" = "nodo$N" ]; then S=nodo${N}sb; else S=nodo$N; fi

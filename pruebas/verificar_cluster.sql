@@ -14,7 +14,7 @@ select pg_is_in_recovery() as es_standby,
        now() - pg_last_xact_replay_timestamp() as retardo;
 
 -- C) En AMBOS (primario y su standby): los conteos deben ser iguales
-select (select count(*) from puerto.manifiesto_carga) as manifiestos,
-       (select count(*) from puerto.contenedor) as contenedores,
-       (select count(*) from puerto.detalle_mercancia) as detalles,
-       (select count(*) from puerto.inspeccion_transito) as inspecciones;
+select (select count(*) from puerto."ManifiestoCarga") as manifiestos,
+       (select count(*) from puerto."Contenedor") as contenedores,
+       (select count(*) from puerto."DetalleMercancia") as detalles,
+       (select count(*) from puerto."InspeccionTransito") as inspecciones;

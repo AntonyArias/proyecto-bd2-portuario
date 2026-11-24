@@ -22,7 +22,7 @@ bash scripts/failover.sh $N > /dev/null
 T_PRO=$(now)
 wait $PY || true
 RES=$({ echo "CREATE TEMP TABLE a(id bigint); COPY a FROM STDIN;"; tr -d '\r' < acked_n$N.txt; echo '\.'; \
-  echo "SELECT (SELECT count(*) FROM a), (SELECT count(*) FROM a LEFT JOIN puerto.inspeccion_transito i ON i.id_inspeccion_transito=a.id WHERE i.id_inspeccion_transito IS NULL), (SELECT count(*) FROM puerto.inspeccion_transito WHERE observaciones LIKE 'estres $TAG %');"; } \
+  echo 'SELECT (SELECT count(*) FROM a), (SELECT count(*) FROM a LEFT JOIN puerto."InspeccionTransito" i ON i."CI_IdInspeccionTransito"=a.id WHERE i."CI_IdInspeccionTransito" IS NULL), (SELECT count(*) FROM puerto."InspeccionTransito" WHERE "CT_Observaciones" LIKE '"'estres $TAG %'"');'; } \
   | docker compose exec -T $S psql -U postgres -d puerto -At -q | tail -1)
 IFS='|' read CONF PERD TOTAL <<< "$RES"; EXTRA=$((TOTAL-CONF))
 DET=$(dif $T_DET $T_KILL); PRO=$(dif $T_PRO $T_DET); ALL=$(dif $T_PRO $T_KILL)
